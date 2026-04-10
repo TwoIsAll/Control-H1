@@ -94,16 +94,16 @@ class HybridConfig:
         return HybridConfig(
             vocab_size=256,
             context_len=2048,
-            d_model=160,
-            latent_dim=160,
-            n_layers=10,
-            n_heads=5,
-            d_ff=416,
-            local_encoder_layers=2,
-            local_decoder_layers=2,
-            mamba_state_dim=48,
+            d_model=64,
+            latent_dim=64,
+            n_layers=6,
+            n_heads=4,
+            d_ff=192,
+            local_encoder_layers=1,
+            local_decoder_layers=1,
+            mamba_state_dim=16,
             mamba_expand=2,
-            hybrid_pattern="tmtmtmtmtt",
+            hybrid_pattern="tmtmtm",
             max_patch_len=12,
         )
 
@@ -704,11 +704,11 @@ class ControlH1Model(nn.Module):
     def _init_weights(self, standard_deviation: float) -> None:
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0.0, standard_deviation=standard_deviation)
+                nn.init.normal_(m.weight, mean=0.0, std=standard_deviation)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, mean=0.0, standard_deviation=standard_deviation)
+                nn.init.normal_(m.weight, mean=0.0, std=standard_deviation)
             elif isinstance(m, nn.Conv1d):
                 nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
                 if m.bias is not None:
@@ -1192,7 +1192,7 @@ def save_state_dict_pt(model: nn.Module, path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     torch.save(model.state_dict(), path)
 
-def load_state_dict_pt(model: nn.Module, path: str, map_location: str | torch.device = "cpu") -> None:
+def load_state_dict_pt(model: nn.Module, path: str, map_location: Union[str, torch.device] = "cpu") -> None:
     sd = torch.load(path, map_location=map_location)
     model.load_state_dict(sd, strict=True)
 
@@ -1273,7 +1273,7 @@ def pick_closest_to_target(target_params: int = 2_000_000) -> HybridConfig:
     return best_cfg
 
 def build_default_2m_model() -> ControlH1Model:
-    configuration = pick_closest_to_target(2_000_000)
+    configuration = HybridConfig.from_dict(DEFAULT_HYBRID_CONFIG)
     return ControlH1Model(configuration)
 @dataclass
 
@@ -2386,7 +2386,7 @@ def _parse_cli_args(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
     return vars(args)
 
 def _cli_info(target_params: int, device: str) -> int:
-    configuration = pick_closest_to_target(target_params=target_params)
+    configuration = HybridConfig.from_dict(DEFAULT_HYBRID_CONFIG)
     model = ControlH1Model(configuration).to(device)
     print(format_param_report(model))
     print("Diagnostics:", model_diagnostics(model))
@@ -2394,13 +2394,13 @@ def _cli_info(target_params: int, device: str) -> int:
     return 0
 
 def _cli_dryrun(batch_size: int, seq: int, device: str) -> int:
-    configuration = HybridConfig.tiny_2m_context2k()
+    configuration = HybridConfig.from_dict(DEFAULT_HYBRID_CONFIG)
     model = ControlH1Model(configuration).to(device)
     print(dry_run_shapes(model, batch_size=batch_size, seq=seq, device=device))
     return 0
 
 def _cli_generate(prompt: str, max_new: int, temp: float, top_k: int, device: str) -> int:
-    configuration = HybridConfig.tiny_2m_context2k()
+    configuration = HybridConfig.from_dict(DEFAULT_HYBRID_CONFIG)
     model = ControlH1Model(configuration).to(device)
     input_tensor = torch.tensor([bytes_from_text(prompt)], dtype=torch.long, device=device)
     output_tensor = model.generate(input_tensor, max_new_tokens=max_new, temperature=temp, top_k=top_k)
@@ -2426,7 +2426,7 @@ def _cli_smoke() -> int:
 def _cli_export(output_tensor: str) -> int:
     model = build_default_2m_model()
     model.save_hwcf(output_tensor, extra_meta={"exported_by": "model.py cli"})
-    print(f"Saved: {out}")
+    print(f"Saved: {output_tensor}")
     return 0
 
 def _cli_validate(path: str) -> int:
@@ -2438,7 +2438,7 @@ def model_cli_main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_cli_args(argv)
     cmd = args.get("cmd")
     if cmd is None:
-        configuration = HybridConfig.tiny_2m_context2k()
+        configuration = HybridConfig.from_dict(DEFAULT_HYBRID_CONFIG)
         model = ControlH1Model(configuration)
         print(format_param_report(model))
         print("Tip: run `python model.py info|dryrun|generate|bench|ablate|smoke|export|validate`")
