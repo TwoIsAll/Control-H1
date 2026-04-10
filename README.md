@@ -1,200 +1,119 @@
-# ControlH1: Architecture Documentation
+# ControlH1: Hybrid Byte-Level Language Model
 
-This document explores the design and implementation of a hybrid language model architecture that combines three distinct approaches to sequence modeling: **Mamba-2 state space models**, **Transformer attention**, and **Byte Latent Transformer (BLT)** principles for byte-level processing.
+This is an experimental implementation of a hybrid language model that combines Mamba-2 state space models, Transformer attention, and Byte Latent Transformer principles. The model works directly on bytes instead of tokens and uses entropy-based dynamic patching to decide where to spend computation.
 
-The implementation is experimental and serves as a testbed for understanding how these components can be integrated. The model operates at approximately 2M parameters and processes raw bytes directly, using entropy-based dynamic patching to determine where to allocate computational resources.
+The current configuration targets about 5M parameters.
 
-## Motivation
+## Architecture
 
-Most modern language models rely on tokenization schemes like BPE or WordPiece to convert text into discrete tokens before processing. This works well but introduces artifacts - token boundaries don't always align with semantic units, and the vocabulary is fixed at training time, limiting the model's ability to handle novel text patterns.
+The model has three main parts:
 
-The BLT paper (Pagnoni et al., 2024) proposed an alternative: work directly on bytes and dynamically group them into "patches" based on their predictability. High-entropy (unpredictable) regions get more granular processing, while low-entropy (repetitive) regions are compressed. This is appealing because it lets the model decide where to spend computation rather than using a fixed vocabulary.
+**Frontend**: Takes raw bytes, embeds them, and uses an entropy predictor to segment them into patches. High-entropy (complex) regions get more granular processing, low-entropy (repetitive) regions get compressed. The entropy predictor is a small MLP that's trained end-to-end with the rest of the model.
 
-Meanwhile, Mamba-2 (Dao & Gu, 2024) showed that state space models can achieve performance competitive with Transformers while having linear-time complexity. The "structured state space duality" framework unifies SSMs and attention, suggesting they're two sides of the same coin.
+The segmentation algorithm is greedy - it starts a new patch when entropy exceeds a threshold or the patch reaches max length. This prevents pathological cases like single-byte patches or patches that grow without bound. Patches can be aggregated using mean, max, sum, or attention-weighted pooling.
 
-This implementation explores what happens when you combine these ideas: a byte-level frontend with entropy-based patching, a hybrid backbone mixing Transformer and Mamba-2 layers, and a decoder that converts patches back to byte-level predictions.
+**Middle**: A hybrid backbone with Transformer and Mamba-2 layers. The pattern string controls the layer types - for example "tmtmtm" means Transformer, Mamba, Transformer, Mamba, Transformer, Mamba. You can experiment with different patterns to balance speed and accuracy.
 
-**Important**: This code is experimental and untested. The implementation may contain bugs, numerical instability issues, or architectural errors. Use at your own risk. This is primarily a research exploration rather than production-ready software.
+Transformer blocks use RoPE for positional encoding, SwiGLU activation, LayerScale for stability, and RMSNorm for normalization. These are standard modern transformer components.
 
-## Architecture Overview
+Mamba-2 blocks use selective SSM with learnable discretization, SSD dual mixer (linear attention with ELU), depthwise 1D convolution for local context, and gating. The selective aspect means SSM parameters can adapt based on input.
 
-The model consists of three stages:
+**Backend**: Converts patches back to byte-level predictions using a local transformer. The patch representations are projected back to byte dimension and scattered to their original positions, then processed to produce byte-level logits.
 
-### Frontend: Byte-to-Patch Conversion
+## Why This Approach
 
-Raw UTF-8 bytes are embedded directly (256-dimensional vocabulary) and passed through a small local transformer network. A lightweight MLP predictor estimates the entropy at each byte position. Based on these entropy values, the byte sequence is segmented into variable-length patches:
+Working on bytes eliminates tokenization artifacts and gives true multilingual support. The model doesn't care what language or script the text is in. Dynamic patching lets the model decide where to focus computation instead of using a fixed vocabulary.
 
-- If entropy exceeds a threshold, start a new patch
-- Enforce minimum and maximum patch length constraints
-- Patches are aggregated (mean, max, sum, or attention-weighted)
+The trade-off is that the model has to learn subword structure from data, which might require more training than a tokenized model that already has built-in subword knowledge.
 
-The intuition is that the model learns to identify "interesting" boundaries. Repetitive sequences (low entropy) get compressed into fewer patches, while complex or unpredictable content (high entropy) gets more granular processing.
+Mamba layers are linear-time (efficient for long sequences) while Transformer layers are quadratic-time (better for precise attention). Mixing them lets you get the benefits of both. The pattern string is a simple way to experiment with different arrangements without changing code.
 
-### Middle: Hybrid Backbone
+## SSM Scan Modes
 
-The patch representations pass through a configurable sequence of Transformer and Mamba-2 blocks. A pattern string determines the layer types - for example, `"tmttmtmtt"` means Transformer, Mamba, Transformer, Transformer, Mamba, etc.
+The SelectiveSSMCore supports three scan modes:
 
-**Transformer blocks** use:
-- RoPE (rotary positional embeddings)
-- SwiGLU activation in the feedforward network
-- LayerScale for training stability
-- RMSNorm for normalization
+- parallel: Full parallel scan using cumulative products, efficient for short sequences
+- chunk: Chunked scan with state passing between chunks, balanced approach
+- recurrent: Pure recurrent scan, useful for very long sequences or debugging
 
-**Mamba-2 blocks** use:
-- Selective SSM with learnable discretization parameters
-- SSD dual mixer (essentially linear attention with ELU)
-- Depthwise 1D convolution for local context
-- Gating mechanism
-
-The hybrid pattern is interesting because it lets you explore different trade-offs. Mamba layers are O(n) in sequence length, while Transformer layers are O(n²). The pattern lets you place attention where you think it matters most - perhaps at the beginning and end of the network, with SSMs in the middle.
-
-### Backend: Patch-to-Byte Conversion
-
-The processed patch representations are projected back to the byte dimension and scattered to their original positions. A local transformer network processes the byte-level representations, and a final head produces byte-level logits.
-
-## Design Decisions
-
-### Why Bytes?
-
-Working directly on bytes eliminates tokenization artifacts and gives the model true multilingual support - it doesn't care what language or script the text is in. The trade-off is that the model has to learn subword structure from data, which might require more training data than a tokenized model.
-
-### Why Entropy-Based Patching?
-
-Fixed patch sizes would be simple but don't adapt to input complexity. Entropy-based patching lets the model dynamically decide where to spend computation. The entropy predictor is small (3-layer MLP) and trained end-to-end with the rest of the model.
-
-The segmentation algorithm ensures patches respect minimum and maximum length constraints, which prevents pathological cases (e.g., single-byte patches or patches that grow without bound).
-
-### Why Hybrid Layers?
-
-The theoretical framework from Mamba-2 suggests that SSMs and attention are dual formulations of the same underlying operation. In practice, they have different computational characteristics - SSMs are linear-time but might lose some precision, while attention is quadratic but exact.
-
-Mixing them lets you get the best of both worlds: SSMs for efficient long-range modeling, attention for precise retrieval when needed. The pattern string is a simple way to experiment with different arrangements without changing the code.
-
-### Custom Checkpoint Format
-
-The `.hwcf` format is a simple binary format that stores:
-- Magic bytes for identification
-- Version information
-- Model configuration as JSON
-- Tensor index (name, dtype, shape, offset, size)
-- Tensor data (16-byte aligned)
-
-This is inspired by formats like GGUF but simplified for this use case. It includes optimizer state and training metadata, enabling checkpoint resumption.
+The discretization uses softplus for the time step parameter (ensures positivity) and learns state decay in log-space for numerical stability. The selective aspect means discretization parameters can vary based on input.
 
 ## Configuration
 
-The default configuration targets ~2M parameters:
+The config is in config.py. Key settings:
 
-```python
-{
-    "vocab_size": 256,              # Byte vocabulary
-    "context_len": 2048,            # Context window
-    "d_model": 192,                 # Model dimension
-    "n_layers": 12,                 # Total layers
-    "n_heads": 6,                   # Attention heads
-    "d_ff": 512,                    # FFN dimension
-    "hybrid_pattern": "tmttmtmttmtt",  # Layer pattern
-    "max_patch_len": 16,            # Maximum bytes per patch
-    "min_patch_len": 1,             # Minimum bytes per patch
-    "patch_entropy_threshold": 2.2,  # Entropy threshold
-    "local_encoder_layers": 2,      # BLT encoder layers
-    "local_decoder_layers": 2,      # BLT decoder layers
-    "mamba_state_dim": 64,          # SSM state dimension
-    "ssd_rank": 32,                 # SSD mixer rank
-}
+- vocab_size: 256 (one per byte)
+- context_len: 2048 bytes
+- d_model: 96
+- n_layers: 6
+- n_heads: 4
+- d_ff: 256
+- hybrid_pattern: "tmtmtm"
+- max_patch_len: 16
+- min_patch_len: 1
+- patch_entropy_threshold: 2.2
+- local_encoder_layers: 1
+- local_decoder_layers: 1
+- mamba_state_dim: 16
+- mamba_conv_kernel: 3
+- mamba_expand: 2
+- ssd_rank: 16
+- entropy_predictor_hidden: 64
+- patch_embed_dim: 96
+- patch_agg: "mean"
+- ssm_scan_mode: "auto"
+
+You can modify these to experiment with different sizes and architectures. The model.py file also has a tiny_2m_context2k() method for an even smaller config.
+
+## Running
+
+Run the model directly to see parameter count:
+```
+python model.py
 ```
 
-A smaller preset (`HybridConfig.tiny_2m_context2k()`) uses d_model=160, n_layers=10, and pattern `"tmtmtmtmtt"` for a tighter parameter budget.
+Other commands:
+- `python model.py info` - detailed model info
+- `python model.py dryrun` - test forward pass
+- `python model.py generate` - generate text
+- `python model.py bench` - benchmark scan modes
+- `python model.py ablate` - run ablation suite
+- `python model.py smoke` - run smoke tests
+- `python model.py export` - save model to .hwcf format
+- `python model.py validate` - validate a .hwcf file
 
-## Implementation Notes
+## Checkpoint Format
 
-### Mamba-2 SSM
-
-The SelectiveSSMCore implements the selective state space model with three scan modes:
-- `parallel`: Full parallel scan using cumulative products (efficient for short sequences)
-- `chunk`: Chunked scan with state passing between chunks (balanced)
-- `recurrent`: Pure recurrent scan (for very long sequences or debugging)
-
-The discretization uses the softplus function for the time step parameter dt, which ensures positivity. The state decay parameter A is learned in log-space for numerical stability.
-
-### SSD Dual Mixer
-
-The SSDDualMixer implements the "structured state space duality" formulation. It's essentially linear attention with ELU activation:
-
-```
-q = ELU(W_q x)
-k = ELU(W_k x)
-v = W_v x
-KV = cumsum(k ⊗ v)
-K = cumsum(k)
-output = (q ⊗ KV) / K
-```
-
-This is mathematically equivalent to a certain class of SSMs, which is why it's called "dual" to SSMs.
-
-### BLT Patching
-
-The entropy predictor is a simple MLP: Linear → SiLU → Linear → SiLU → Linear → softplus. The softplus ensures the output is positive (entropy is non-negative).
-
-The segmentation algorithm is greedy - it starts a new patch when either entropy exceeds threshold or the patch reaches maximum length. This is simple and works well in practice, though more sophisticated approaches could be explored.
-
-### Training
-
-The training script supports:
-- Pretraining on raw text (`.txt`, `.jsonl`, `.parquet`)
-- Finetuning on conversation data with role tagging
-- AdamW optimizer with cosine decay and warmup
-- Gradient clipping and mixed precision
-- Per-epoch checkpointing with validation evaluation
-
-Conversation data is tagged with role markers (`<|user|>`, `<|assistant|>`, `<|end|>`) for finetuning. The tagging is applied automatically when the input format includes role information.
-
-### Generation
-
-Autoregressive generation uses a sliding context window. At each step:
-1. Truncate input to context_len
-2. Run forward pass
-3. Sample next byte (temperature + top-k)
-4. Append and repeat
-
-Dynamic patching can be disabled during generation (`force_uniform_patch=True`) for deterministic behavior, though this typically hurts quality since the model was trained with adaptive patching.
+The .hwcf format is a simple binary format that stores magic bytes, version info, model config as JSON, tensor index (name, dtype, shape, offset, size), and tensor data aligned to 16-byte boundaries. It also includes optimizer state and training metadata for checkpoint resumption.
 
 ## Observations
 
-### Parameter Efficiency
+At about 5M parameters, this is much smaller than modern LLMs (billions of parameters). The hybrid architecture helps make the most of limited parameters by using SSM layers for efficient long-range context without quadratic attention cost everywhere.
 
-At ~2M parameters, the model is much smaller than modern LLMs (which are typically billions of parameters). The hybrid architecture helps make the most of limited parameters - SSM layers provide efficient long-range context without the quadratic cost of attention everywhere.
+During training, you can observe the model learning to place patch boundaries at sensible locations. For English text, patches often align with word boundaries. For code, they might align with tokens or statements.
 
-### Entropy Patterning
+The choice of hybrid pattern affects performance and efficiency. More Transformer layers give better retrieval but slower inference. More Mamba layers are faster but might lose some precision for tasks requiring exact attention.
 
-During training, you can observe the model learning to place patch boundaries at sensible locations. For English text, patches often align with word boundaries. For code, they might align with tokens or statements. The entropy threshold becomes a learned hyperparameter that balances compression vs. granularity.
+## Important Notes
 
-### Layer Pattern Sensitivity
+This code is experimental and untested. It may contain bugs or numerical issues. Use at your own risk. This is primarily for research and architectural exploration, not production use.
 
-The choice of hybrid pattern affects both performance and efficiency. More Transformer layers (pattern with more 't's) give better retrieval but slower inference. More Mamba layers (more 'm's) are faster but might lose some precision. The optimal pattern likely depends on the task and data distribution.
+The model needs substantial data to learn meaningful byte-level patterns. Small datasets won't see much benefit over tokenization since the model must learn subword structure from scratch.
 
-## Limitations
+The entropy predictor is a simple MLP which looks at each byte position independently. This might not capture complex boundary patterns where the decision to split depends on context from neighboring positions. A transformer-based predictor would use attention to look at relationships between different byte positions when deciding where to place patch boundaries, which could capture more complex patterns but would add more parameters.
 
-- **Scale**: At 2M parameters, the model is too small for serious language modeling tasks. It's primarily useful for architectural exploration.
-- **Byte-level overhead**: Processing bytes directly can be less efficient than tokenization for very long repetitive sequences, though dynamic patching mitigates this.
-- **Training data**: The model needs substantial data to learn meaningful byte-level patterns. Small datasets won't see much benefit over tokenization.
-- **Entropy predictor**: The simple MLP might not capture complex boundary patterns. A more sophisticated predictor (e.g., a small transformer) could improve patching.
-
-## Future Directions
-
-Things worth exploring:
-
-- **Scale up**: Larger models with more parameters to see if the architecture scales effectively
-- **Pattern search**: Systematic exploration of optimal layer patterns for different tasks
-- **Better patching**: Learned aggregation (attention-weighted instead of simple pooling), more sophisticated entropy models
-- **Quantization**: The custom checkpoint format could support quantized weights for faster inference
-- **Efficient scans**: CUDA kernels for the SSM scan operations
-- **Alternative backends**: JAX or Triton implementations for better performance
+Finding the optimal hybrid pattern for a given task requires experimentation. There's no theoretical guidance on what pattern works best for which tasks, so you need to try different patterns and evaluate.
 
 ## References
 
-- Mamba-2: "Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality" (Dao & Gu, 2024)
-- BLT: "Byte Latent Transformer: Patches Scale Better Than Tokens" (Pagnoni et al., 2024)
+- Mamba-2: "Transformers are SSMs" (Dao & Gu, 2024)
+- BLT: "Byte Latent Transformer" (Pagnoni et al., 2024)
 - Transformer: "Attention Is All You Need" (Vaswani et al., 2017)
 - RoPE: "RoFormer: Enhanced Transformer with Rotary Position Embedding" (Su et al., 2021)
 - SwiGLU: "GLU Variants Improve Transformer" (Shazeer, 2020)
+- RMSNorm: "Root Mean Square Layer Normalization" (Zhang & Sennrich, 2019)
+- LayerScale: "On Layer Normalization in the Transformer Architecture" (Touvron et al., 2021)
+
+## Future Work
+
+Potential improvements include scaling up to larger models, systematic pattern search for optimal layer arrangements, learned aggregation instead of simple pooling, quantization support for faster inference, CUDA kernels for SSM scans, and JAX or Triton implementations for better performance.
