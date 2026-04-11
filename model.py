@@ -617,13 +617,14 @@ class BLTFrontEnd(nn.Module):
     def forward(
         self,
         x_bytes: torch.Tensor,
+        precomputed_entropy: Optional[torch.Tensor] = None,
         force_uniform_patch: bool = False,
     ) -> Tuple[torch.Tensor, List[List[Tuple[int, int]]], torch.Tensor]:
         b, t = x_bytes.shape
         h = self.byte_emb(x_bytes)
         for blk in self.local_enc:
             h = blk(h)
-        entropy = self.entropy_pred(h).detach()
+        entropy = precomputed_entropy if precomputed_entropy is not None else self.entropy_pred(h).detach()
         if force_uniform_patch:
             segments: List[List[Tuple[int, int]]] = []
             step = self.configuration.max_patch_len
@@ -781,6 +782,7 @@ class ControlH1Model(nn.Module):
         self,
         input_bytes: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        precomputed_entropy: Optional[torch.Tensor] = None,
         force_uniform_patch: bool = False,
         return_aux: bool = False,
     ) -> Dict[str, torch.Tensor]:
@@ -790,7 +792,7 @@ class ControlH1Model(nn.Module):
             x = input_bytes
         assert x.dim() == 2, "Expected [B, T]"
         assert x.size(1) <= self.configuration.context_len, "Sequence exceeds context_len"
-        latent, segments, patch_mask = self.front(x, force_uniform_patch=force_uniform_patch)
+        latent, segments, patch_mask = self.front(x, precomputed_entropy=precomputed_entropy, force_uniform_patch=force_uniform_patch)
         latent = self.middle(latent, patch_mask=patch_mask)
         logits = self.back(latent, segments, t_bytes=x.size(1), residual_local=None)
         output_tensor: Dict[str, torch.Tensor] = {"logits": logits}
