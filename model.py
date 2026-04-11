@@ -938,7 +938,9 @@ class ControlH1Model(nn.Module):
                 f.seek(payload_start + off)
                 raw = f.read(nbytes)
                 dtype = CODE_TO_DTYPE[dtype_code]
-                tensor = torch.frombuffer(bytearray(raw), dtype=dtype).clone().view(*shape)
+                tensor = torch.frombuffer(bytearray(raw), dtype=dtype).clone()
+                if shape:
+                    tensor = tensor.view(*shape)
                 state[name] = tensor
             model.load_state_dict(state, strict=True)
             model.to(map_location)
