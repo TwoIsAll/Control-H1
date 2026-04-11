@@ -842,6 +842,7 @@ class ControlH1Model(nn.Module):
         path: str,
         optimizer_state: Optional[Dict[str, object]] = None,
         extra_meta: Optional[Dict[str, str]] = None,
+        entropy_data: Optional[Dict[str, torch.Tensor]] = None,
     ) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         cfg_json = json.dumps(self.configuration.to_dict()).encode("utf-8")
@@ -867,6 +868,11 @@ class ControlH1Model(nn.Module):
             buf = io.BytesIO()
             torch.save(optimizer_state, buf)
             opt_blob = buf.getvalue()
+        entropy_blob = b""
+        if entropy_data is not None:
+            buf = io.BytesIO()
+            torch.save(entropy_data, buf)
+            entropy_blob = buf.getvalue()
         metadata = {
             "created_unix": str(int(time.time())),
             "model_class": self.__class__.__name__,
@@ -883,6 +889,7 @@ class ControlH1Model(nn.Module):
             f.write(struct.pack("<I", len(entries)))
             f.write(struct.pack("<I", len(meta_blob)))
             f.write(struct.pack("<I", len(opt_blob)))
+            f.write(struct.pack("<I", len(entropy_blob)))
             f.write(cfg_json)
             f.write(meta_blob)
             for name, dtype_code, shape, off, nbytes in entries:
@@ -898,13 +905,15 @@ class ControlH1Model(nn.Module):
             f.write(blob.getvalue())
             if opt_blob:
                 f.write(opt_blob)
+            if entropy_blob:
+                f.write(entropy_blob)
     @staticmethod
 
     def load_hwcf(
         path: str,
         map_location: Union[str, torch.device] = "cpu",
         load_optimizer: bool = False,
-    ) -> Tuple["ControlH1Model", Optional[Dict[str, object]], Dict[str, str]]:
+    ) -> Tuple["ControlH1Model", Optional[Dict[str, object]], Dict[str, str], Optional[Dict[str, torch.Tensor]]]:
         with open(path, "rb") as f:
             magic = f.read(4)
             if magic != MODEL_MAGIC:
@@ -916,6 +925,7 @@ class ControlH1Model(nn.Module):
             n_tensors = struct.unpack("<I", f.read(4))[0]
             meta_len = struct.unpack("<I", f.read(4))[0]
             opt_len = struct.unpack("<I", f.read(4))[0]
+            entropy_len = struct.unpack("<I", f.read(4))[0]
             cfg_blob = f.read(cfg_len)
             meta_blob = f.read(meta_len)
             cfg_dict = json.loads(cfg_blob.decode("utf-8"))
@@ -953,7 +963,14 @@ class ControlH1Model(nn.Module):
                 opt_blob = f.read(opt_len)
                 if opt_blob:
                     opt_state = torch.load(io.BytesIO(opt_blob), map_location=map_location)
-            return model, opt_state, meta_dict
+            entropy_data = None
+            if entropy_len > 0:
+                end_payload = payload_start + max((off + nbytes for _, _, _, off, nbytes in table), default=0)
+                f.seek(end_payload + opt_len)
+                entropy_blob = f.read(entropy_len)
+                if entropy_blob:
+                    entropy_data = torch.load(io.BytesIO(entropy_blob), map_location=map_location)
+            return model, opt_state, meta_dict, entropy_data
 @dataclass
 
 class ParamGroupStat:
