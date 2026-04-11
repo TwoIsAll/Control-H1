@@ -151,17 +151,17 @@ def evaluate(model, loader, device, max_batches=64, amp=True):
     avg = sum(losses) / len(losses)
     return {"loss": avg, "ppl": float(math.exp(min(20, avg)))}
 
-def save_epoch_checkpoint(model, optimizer, scheduler, output_dir, state, tag="epoch"):
+def save_epoch_checkpoint(model, optimizer, scheduler, output_dir, state, tag="epoch", entropy_data=None):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"{tag}_{state.epoch:04d}_step_{state.global_step:08d}.hwcf")
-    model.save_hwcf(path, optimizer_state={"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "train_state": vars(state)}, extra_meta={k: str(v) for k, v in vars(state).items()})
+    model.save_hwcf(path, optimizer_state={"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "train_state": vars(state)}, extra_meta={k: str(v) for k, v in vars(state).items()}, entropy_data=entropy_data)
     return path
 
 def load_checkpoint_if_any(model, optimizer, scheduler, resume_path, device):
     state = TrainState()
     if not resume_path:
-        return state
-    loaded_model, opt_state, meta = ControlH1Model.load_hwcf(resume_path, map_location=device, load_optimizer=True)
+        return state, None
+    loaded_model, opt_state, meta, entropy_data = ControlH1Model.load_hwcf(resume_path, map_location=device, load_optimizer=True)
     model.load_state_dict(loaded_model.state_dict(), strict=True)
     if opt_state:
         if "optimizer" in opt_state:
@@ -172,7 +172,7 @@ def load_checkpoint_if_any(model, optimizer, scheduler, resume_path, device):
         state.epoch = int(ts.get("epoch", meta.get("epoch", 0)))
         state.global_step = int(ts.get("global_step", meta.get("global_step", 0)))
         state.best_loss = float(ts.get("best_loss", meta.get("best_loss", 1e9)))
-    return state
+    return state, entropy_data
 
 def precompute_entropy(data: Sequence[int], config: HybridConfig, device: torch.device, batch_size: int = 32) -> torch.Tensor:
     from model import BLTFrontEnd, ByteEmbedding
@@ -204,9 +204,11 @@ def train_loop(args):
         print("Precomputing entropy...")
         train_entropy = precompute_entropy(train_bytes, config, device)
         val_entropy = precompute_entropy(val_bytes, config, device)
+        entropy_data = {"train": train_entropy, "val": val_entropy}
     else:
         train_entropy = None
         val_entropy = None
+        entropy_data = None
     train_loader = make_dataloader(ByteSequenceDataset(train_bytes, config.context_len, args.stride, args.random_offset, train_entropy), args.batch_size, True, args.num_workers, device.type == "cuda")
     val_loader = make_dataloader(ByteSequenceDataset(val_bytes, config.context_len, max(1, config.context_len // 2), False, val_entropy), args.batch_size, False, args.num_workers, device.type == "cuda")
     model = ControlH1Model(config).to(device)
@@ -214,7 +216,7 @@ def train_loop(args):
     optimizer = build_optimizer(model, args.lr, args.weight_decay, (args.beta1, args.beta2))
     scheduler = build_scheduler(optimizer, args.warmup_steps, max(1, args.epochs * len(train_loader)))
     scaler = torch.cuda.amp.GradScaler(enabled=(args.amp and device.type == "cuda"))
-    state = load_checkpoint_if_any(model, optimizer, scheduler, args.resume, device)
+    state, _ = load_checkpoint_if_any(model, optimizer, scheduler, args.resume, device)
     model.train()
     os.makedirs(args.output_dir, exist_ok=True)
     for epoch in range(state.epoch, args.epochs):
@@ -248,10 +250,10 @@ def train_loop(args):
             loss_acc += loss.item()
         val = evaluate(model, val_loader, device, args.eval_batches, args.amp)
         print(f"Epoch {state.epoch}: train_loss={loss_acc/len(train_loader):.5f} val_loss={val['loss']:.5f} val_ppl={val['ppl']:.3f}")
-        save_epoch_checkpoint(model, optimizer, scheduler, args.output_dir, state)
+        save_epoch_checkpoint(model, optimizer, scheduler, args.output_dir, state, entropy_data=entropy_data)
         if val["loss"] < state.best_loss:
             state.best_loss = val["loss"]
-            save_epoch_checkpoint(model, optimizer, scheduler, args.output_dir, state, "best")
+            save_epoch_checkpoint(model, optimizer, scheduler, args.output_dir, state, "best", entropy_data=entropy_data)
 
 def add_common_model_args(p):
     p.add_argument("--config-json", type=str, default="")
@@ -319,7 +321,7 @@ def build_parser():
 
 def run_sample(args):
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
-    model, _, meta = ControlH1Model.load_hwcf(args.checkpoint, map_location=device, load_optimizer=False)
+    model, _, meta, _ = ControlH1Model.load_hwcf(args.checkpoint, map_location=device, load_optimizer=False)
     model.eval()
     x = torch.tensor([bytes_from_text(args.prompt)], dtype=torch.long, device=device)
     with torch.no_grad():
