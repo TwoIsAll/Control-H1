@@ -2,13 +2,13 @@
 
 This is an experimental hybrid language model that mixes Mamba-2 state space models, Transformer attention, and Byte Latent Transformer ideas. It works directly on bytes not tokens and uses entropy-based dynamic patching to figure out where to spend computation.
 
-Current config is around 2.3M parameters.
+Current config is around 20M parameters.
 
 ## Architecture
 
 Three main parts:
 
-**Frontend**: Takes raw bytes, embeds them, uses an entropy predictor (small transformer with attention) to segment into patches. High-entropy areas get more granular processing, low-entropy repetitive areas get compressed. The segmentation is greedy - starts new patch when entropy exceeds threshold or patch hits max length.
+**Frontend**: Takes raw bytes, embeds them, uses an entropy predictor (small transformer with attention) to segment into patches. High-entropy areas get more granular processing, low-entropy repetitive areas get compressed. The segmentation is greedy - starts new patch when entropy exceeds threshold or patch hits max length. Entropy is precomputed during data loading for efficiency.
 
 **Middle**: Hybrid backbone with Transformer and Mamba-2 layers. Pattern string controls layer types - "tmtm" means Transformer, Mamba, Transformer, Mamba. You can mess with different patterns to balance speed vs accuracy.
 
@@ -30,17 +30,18 @@ Config in config.py. Key stuff:
 
 - vocab_size: 256 (per byte)
 - context_len: 2048 bytes
-- d_model: 64
-- n_layers: 4
-- n_heads: 4
-- d_ff: 192
+- d_model: 128
+- n_layers: 9
+- n_heads: 8
+- d_ff: 384
 - hybrid_pattern: "tmtm"
 - max_patch_len: 16
 - min_patch_len: 1
 - patch_entropy_threshold: 2.2
-- mamba_state_dim: 16
+- mamba_state_dim: 32
 - mamba_expand: 2
-- ssd_rank: 16
+- ssd_rank: 32
+- gradient_checkpointing: True
 
 There's also TINY_HYBRID_CONFIG for ~240K params if you want something even smaller.
 
@@ -62,9 +63,11 @@ Other commands:
 
 Train:
 ```
-python train.py pretrain --data input.txt
-python train.py finetune --data tiny.jsonl
+python train.py pretrain --data input.txt --epochs 2 --batch-size 8
+python train.py finetune --data tiny.jsonl --epochs 15 --batch-size 8
 ```
+
+Entropy preprocessing is enabled by default. Use `--no-precompute-entropy` to disable it and compute entropy during training (slower).
 
 ## Checkpoint Format
 
