@@ -10,7 +10,7 @@ Three main parts:
 
 **Frontend**: Takes raw bytes, embeds them, uses an entropy predictor (small transformer with attention) to segment into patches. High-entropy areas get more granular processing, low-entropy repetitive areas get compressed. The segmentation is greedy - starts new patch when entropy exceeds threshold or patch hits max length. Entropy is precomputed during data loading for efficiency.
 
-**Middle**: Hybrid backbone with Transformer and Mamba-2 layers. Pattern string controls layer types - "tmtm" means Transformer, Mamba, Transformer, Mamba. You can mess with different patterns to balance speed vs accuracy.
+**Middle**: Hybrid backbone with Transformer and Mamba-2 layers. Pattern string controls layer types - "mmmt" means Transformer, Mamba, Transformer, Mamba. You can mess with different patterns to balance speed vs accuracy.
 
 Transformer blocks use RoPE for positional encoding, SwiGLU activation, LayerScale, RMSNorm. Mamba-2 blocks use selective SSM with learnable discretization, SSD dual mixer, depthwise convolution, and gating.
 
@@ -34,7 +34,7 @@ Config in config.py. Key stuff:
 - n_layers: 9
 - n_heads: 8
 - d_ff: 384
-- hybrid_pattern: "tmtm"
+- hybrid_pattern: "mmmt"
 - max_patch_len: 16
 - min_patch_len: 1
 - patch_entropy_threshold: 2.2
