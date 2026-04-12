@@ -250,6 +250,8 @@ def train_loop(args):
             state.global_step += 1
             loss_acc += loss.item()
             pbar.set_postfix({"loss": f"{loss.item():.4f}", "avg_loss": f"{loss_acc/(state.global_step - (epoch-1)*len(train_loader)):.4f}"})
+            if args.save_every_steps > 0 and state.global_step % args.save_every_steps == 0:
+                save_epoch_checkpoint(model, optimizer, scheduler, args.output_dir, state, "step", entropy_data=entropy_data)
         val = evaluate(model, val_loader, device, args.eval_batches, args.amp)
         print(f"Epoch {state.epoch}: train_loss={loss_acc/len(train_loader):.5f} val_loss={val['loss']:.5f} val_ppl={val['ppl']:.3f}")
         save_epoch_checkpoint(model, optimizer, scheduler, args.output_dir, state, entropy_data=entropy_data)
@@ -298,6 +300,7 @@ def add_common_train_args(p):
     p.add_argument("--amp", action="store_true")
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--resume", type=str, default="")
+    p.add_argument("--save-every-steps", type=int, default=0)
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="train.py")
