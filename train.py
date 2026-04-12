@@ -360,7 +360,7 @@ def run_chat(args):
             with torch.no_grad():
                 y = model.generate(x, max_new_tokens=args.max_new_tokens, temperature=args.temperature, top_k=args.top_k)
             response = bytes(y[0].tolist()).decode("utf-8", errors="replace")
-            conversation = y[0].tolist()
+            conversation = bytes(y[0].tolist())
             print(f"Model: {response}")
             print("-" * 60)
         except KeyboardInterrupt:
