@@ -1,91 +1,58 @@
 # ControlH1: Hybrid Byte-Level Language Model
 
-This is an experimental hybrid language model that mixes Mamba-2 state space models, Transformer attention, and Byte Latent Transformer ideas. It works directly on bytes not tokens and uses entropy-based dynamic patching to figure out where to spend computation.
+Experimental hybrid model mixing Mamba-2, Transformer, and Byte Latent Transformer. Works on raw bytes with entropy-based dynamic patching.
 
-Current config is around 34M parameters.
+Current config: ~34M parameters.
 
 ## Architecture
 
-Three main parts:
+**Frontend**: Takes raw bytes, embeds them, entropy predictor segments into patches. High entropy = more granular, low entropy = compressed. Entropy is precomputed before training for speed.
 
-**Frontend**: Takes raw bytes, embeds them, uses an entropy predictor (small transformer with attention) to segment into patches. High-entropy areas get more granular processing, low-entropy repetitive areas get compressed. The segmentation is greedy - starts new patch when entropy exceeds threshold or patch hits max length. Entropy is precomputed during data loading for efficiency.
+**Middle**: Hybrid backbone with Transformer and Mamba-2 layers. Pattern "mmmt" = 3 Mamba + 1 Transformer. More Mamba = faster, more Transformer = better attention.
 
-**Middle**: Hybrid backbone with Transformer and Mamba-2 layers. Pattern string controls layer types - "mmmt" means Transformer, Mamba, Transformer, Mamba. You can mess with different patterns to balance speed vs accuracy.
+**Backend**: Local transformer converts patches back to byte-level predictions.
 
-Transformer blocks use RoPE for positional encoding, SwiGLU activation, LayerScale, RMSNorm. Mamba-2 blocks use selective SSM with learnable discretization, SSD dual mixer, depthwise convolution, and gating.
+## Why bytes
 
-**Backend**: Converts patches back to byte-level predictions using local transformer. Projects patch representations to byte dimension, scatters to original positions, processes to produce logits.
+No tokenization artifacts, true multilingual. Model learns subword structure from data. Dynamic patching lets model decide where to spend compute.
 
-## Why This
+## Config (config.py)
 
-Working on bytes means no tokenization artifacts and true multilingual support. Model doesn't care what language or script. Dynamic patching lets the model decide where to focus compute instead of fixed vocab.
-
-Trade-off is model has to learn subword structure from data, might need more training than tokenized models with built-in subword knowledge.
-
-Mamba layers are linear-time (good for long sequences) while Transformer layers are quadratic-time (better for precise attention). Mixing them gives benefits of both. Pattern string is simple way to experiment without code changes.
-
-## Configuration
-
-Config in config.py. Key stuff:
-
-- vocab_size: 256 (per byte)
-- context_len: 2048 bytes
+- vocab_size: 256
+- context_len: 512 bytes
 - d_model: 128
 - n_layers: 9
 - n_heads: 8
-- d_ff: 384
 - hybrid_pattern: "mmmt"
 - max_patch_len: 16
-- min_patch_len: 1
-- patch_entropy_threshold: 2.2
-- mamba_state_dim: 32
-- mamba_expand: 2
-- ssd_rank: 32
 - gradient_checkpointing: True
-
-There's also TINY_HYBRID_CONFIG for ~240K params if you want something even smaller.
 
 ## Running
 
-Run model to see param count:
+Check params:
 ```
 python model.py
 ```
 
-Other commands:
-- `python model.py info` - detailed info
-- `python model.py dryrun` - test forward pass
-- `python model.py generate` - generate text
-- `python model.py bench` - benchmark
-- `python model.py smoke` - smoke tests
-- `python model.py export` - save to .hwcf
-- `python model.py validate` - validate .hwcf file
-
 Train:
 ```
-python train.py pretrain --data input.txt --epochs 2 --batch-size 8
+python train.py pretrain --data train-00000-of-00001.parquet --epochs 5 --batch-size 32 --stride 512
 python train.py finetune --data tiny.jsonl --epochs 15 --batch-size 8
 ```
 
-Entropy preprocessing is enabled by default. Use `--no-precompute-entropy` to disable it and compute entropy during training (slower).
+Resume from checkpoint:
+```
+python train.py pretrain --data train-00000-of-00001.parquet --epochs 5 --batch-size 32 --stride 512 --resume checkpoints/epoch_0002_step_00007880.hwcf
+```
 
-## Checkpoint Format
-
-.hwcf is simple binary format with magic bytes, version, config JSON, tensor index, and tensor data aligned to 16-byte boundaries. Includes optimizer state and training metadata for resumption.
+Entropy is precomputed automatically. Checkpoints include optimizer state and entropy data for resume.
 
 ## Notes
 
-This code is experimental and untested. Might have bugs or numerical issues. Use at your own risk. Mainly for research and exploration not production.
-
-Model needs substantial data to learn byte-level patterns. Small datasets won't see much benefit over tokenization since model learns subword structure from scratch.
-
-Finding optimal hybrid pattern requires experimentation. No theoretical guidance on what pattern works best for what tasks, so gotta try different ones and see.
+Experimental code, might have bugs. Needs substantial data to learn byte patterns. Try different hybrid patterns to find what works.
 
 ## References
 
-- Mamba-2: "Transformers are SSMs" (Dao & Gu, 2024)
-- BLT: "Byte Latent Transformer" (Pagnoni et al., 2024)
-- Transformer: "Attention Is All You Need" (Vaswani et al., 2017)
-- RoPE: "RoFormer: Enhanced Transformer with Rotary Position Embedding" (Su et al., 2021)
-- SwiGLU: "GLU Variants Improve Transformer" (Shazeer, 2020)
-- RMSNorm: "Root Mean Square Layer Normalization" (Zhang & Sennrich, 2019)
+- Mamba-2: Dao & Gu 2024
+- BLT: Pagnoni et al 2024
+- Transformer: Vaswani et al 2017
